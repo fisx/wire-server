@@ -190,7 +190,7 @@ uncheckedDeleteTeam zusr zcon tid = do
         Data.deleteTeam tid
   where
     pushEvents now membs c pp = do
-        (bots, users) <- botsAndUsers <$> Data.members (c^.conversationId)
+        (_bots, users) <- botsAndUsers <$> Data.members (c^.conversationId)
         let mm = nonTeamMembers users membs
         let e = Conv.Event Conv.ConvDelete (c^.conversationId) zusr now Nothing
         let p = newPush zusr (ConvEvent e) (map recipient mm)

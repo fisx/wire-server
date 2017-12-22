@@ -304,6 +304,7 @@ executable brig-integration
         API.Search
         API.Search.Util
         API.Team
+        API.Team.Util
         API.TURN
         API.User.Auth
         Util
