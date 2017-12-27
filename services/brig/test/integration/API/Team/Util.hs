@@ -54,5 +54,22 @@ createTeamConv g tid u us name = do
     maybe (error "invalid conv id") return $
         fromByteString $ getHeader' "Location" r
 
+deleteTeamConv :: Galley -> TeamId -> ConvId -> UserId -> Http ()
+deleteTeamConv g tid cid u = do
+    delete ( g
+           . paths ["teams", toByteString' tid, "conversations", toByteString' cid]
+           . zUser u
+           . zConn "conn"
+           ) !!! const 200 === statusCode
+
+deleteTeam :: Galley -> TeamId -> UserId -> Http ()
+deleteTeam g tid u = do
+    delete ( g
+           . paths ["teams", toByteString' tid]
+           . zUser u
+           . zConn "conn"
+           . lbytes (encode $ Team.newTeamDeleteData Util.defPassword)
+           ) !!! const 202 === statusCode
+
 newTeam :: Team.BindingNewTeam
 newTeam = Team.BindingNewTeam $ Team.newNewTeam (unsafeRange "teamName") (unsafeRange "defaultIcon")

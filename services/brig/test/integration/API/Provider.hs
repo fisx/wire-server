@@ -51,6 +51,7 @@ import Util.Options.Common (optOrEnv)
 
 import qualified API.Team.Util                     as Team
 import qualified Brig.Code                         as Code
+import qualified Brig.Types.Intra                  as Intra
 import qualified Brig.Types.Provider.External      as Ext
 import qualified Cassandra                         as DB
 import qualified Control.Concurrent.Async          as Async
@@ -105,8 +106,10 @@ tests conf p db b c g = do
             , test p "message"    $ testMessageBot conf crt db b g c
             ]
         , testGroup "bot-teams"
-            [ test p "add-remove" $ testAddRemoveBotTeam conf crt db b g c
-            , test p "message"    $ testMessageBotTeam conf crt db b g c
+            [ test p "add-remove"  $ testAddRemoveBotTeam conf crt db b g c
+            , test p "message"     $ testMessageBotTeam conf crt db b g c
+            , test p "delete conv" $ testDeleteConvBotTeam conf crt db b g c
+            , test p "delete team" $ testDeleteTeamBotTeam conf crt db b g c
             ]
         ]
 
@@ -523,6 +526,111 @@ testMessageBotTeam config crt db brig galley cannon = withTestService config crt
     cid <- Team.createTeamConv galley tid uid [] Nothing
 
     testMessageBotUtil uid uc cid pid sid sref buf brig galley cannon
+
+testDeleteConvBotTeam :: Maybe Config -> FilePath -> DB.ClientState -> Brig -> Galley -> Cannon -> Http ()
+testDeleteConvBotTeam config crt db brig galley cannon =
+    withTestService config crt db brig defServiceApp $ \sref buf -> do
+
+    let pid = sref^.serviceRefProvider
+    let sid = sref^.serviceRefId
+
+    -- Prepare users
+    u1 <- createUser "Ernie" "success@simulator.amazonses.com" brig
+    u2 <- createUser "Bert"  "success@simulator.amazonses.com" brig
+    let uid1 = userId u1
+    let uid2 = userId u2
+    h <- randomHandle
+
+    tid <- Team.createTeam uid1 galley
+    Team.addTeamMember galley tid $ Team.newNewTeamMember $ Team.newTeamMember uid2 Team.fullPermissions
+
+    putHandle brig uid1 h !!! const 200 === statusCode
+
+    -- Create conversation
+    cid <- Team.createTeamConv galley tid uid1 [uid2] Nothing
+
+    -- Add the bot and check that everyone is notified via an event,
+    -- including the bot itself.
+    bid <- WS.bracketR2 cannon uid1 uid2 $ \(ws1, ws2) -> do
+        _rs <- addBot brig uid1 pid sid cid <!! const 201 === statusCode
+        let Just rs = decodeBody _rs
+        let bid = rsAddBotId rs
+        bot <- svcAssertBotCreated buf bid cid
+        liftIO $ assertEqual "bot client" (rsAddBotClient rs) (testBotClient bot)
+        liftIO $ assertEqual "bot event" MemberJoin (evtType (rsAddBotEvent rs))
+        -- Member join event for both users
+        forM_ [ws1, ws2] $ \ws -> wsAssertMemberJoin ws cid uid1 [botUserId bid]
+        -- Member join event for the bot
+        svcAssertMemberJoin buf uid1 [botUserId bid] cid
+        return (rsAddBotId rs)
+
+    -- Delete the conversation and check that everyone is notified
+    -- via an event, including the bot itself.
+    WS.bracketR2 cannon uid1 uid2 $ \wss -> do
+        -- 200 response on success
+        Team.deleteTeamConv galley tid cid uid2
+        -- Events for the users
+        forM_ wss $ \ws -> wsAssertTeamConvDelete ws tid cid
+        -- Event for the bot
+        svcAssertConvDelete buf uid2 cid
+
+    -- Check that the conversation no longer exists
+    forM_ [uid1, uid2] $ \uid ->
+        getConversation galley uid cid !!! const 404 === statusCode
+    getBotConv galley bid cid !!! const 404 === statusCode
+
+testDeleteTeamBotTeam :: Maybe Config -> FilePath -> DB.ClientState -> Brig -> Galley -> Cannon -> Http ()
+testDeleteTeamBotTeam config crt db brig galley cannon =
+    withTestService config crt db brig defServiceApp $ \sref buf -> do
+
+    let pid = sref^.serviceRefProvider
+    let sid = sref^.serviceRefId
+
+    -- Prepare users
+    u1 <- createUser "Ernie" "success@simulator.amazonses.com" brig
+    u2 <- createUser "Bert"  "success@simulator.amazonses.com" brig
+    let uid1 = userId u1
+    let uid2 = userId u2
+    h <- randomHandle
+
+    tid <- Team.createTeam uid1 galley
+    Team.addTeamMember galley tid $ Team.newNewTeamMember $ Team.newTeamMember uid2 Team.fullPermissions
+
+    putHandle brig uid1 h !!! const 200 === statusCode
+
+    -- Create conversation
+    cid <- Team.createTeamConv galley tid uid1 [uid2] Nothing
+
+    -- Add the bot and check that everyone is notified via an event,
+    -- including the bot itself.
+    bid <- WS.bracketR2 cannon uid1 uid2 $ \(ws1, ws2) -> do
+        _rs <- addBot brig uid1 pid sid cid <!! const 201 === statusCode
+        let Just rs = decodeBody _rs
+        let bid = rsAddBotId rs
+        bot <- svcAssertBotCreated buf bid cid
+        liftIO $ assertEqual "bot client" (rsAddBotClient rs) (testBotClient bot)
+        liftIO $ assertEqual "bot event" MemberJoin (evtType (rsAddBotEvent rs))
+        -- Member join event for both users
+        forM_ [ws1, ws2] $ \ws -> wsAssertMemberJoin ws cid uid1 [botUserId bid]
+        -- Member join event for the bot
+        svcAssertMemberJoin buf uid1 [botUserId bid] cid
+        return (rsAddBotId rs)
+
+    -- Delete the team, and check that the bot receives
+    -- a notification via event
+    Team.deleteTeam galley tid uid1
+
+    -- Ensure users have been deleted
+    forM_ [uid1, uid2] $ \uid ->
+        retryWhileN 10 (/= Intra.Deleted) (getStatus brig uid)
+
+    -- TODO: Still does not work
+    svcAssertEventuallyConvDelete buf uid1 cid
+
+    -- Check that the conversation no longer exists
+    forM_ [uid1, uid2] $ \uid ->
+        getConversation galley uid cid !!! const 404 === statusCode
+    getBotConv galley bid cid !!! const 404 === statusCode
 
 --------------------------------------------------------------------------------
 -- API Operations
@@ -1002,6 +1110,23 @@ wsAssertMemberLeave ws conv usr old = void $ liftIO $
         evtFrom      e @?= usr
         evtData      e @?= Just (EdMembers (Members old))
 
+wsAssertTeamConvDelete :: MonadIO m => WS.WebSocket -> TeamId -> ConvId -> m ()
+wsAssertTeamConvDelete ws tid conv = void $ liftIO $
+    WS.assertMatch (5 # Second) ws $ \n -> do
+        let e = List1.head (WS.unpackPayload n)
+        ntfTransient n @?= False
+        e^.(Team.eventType) @?= Team.ConvDelete
+        e^.(Team.eventTeam) @?= tid
+        e^.(Team.eventData) @?= Just (Team.EdConvDelete conv)
+
+{-    checkTeamConvDeleteEvent tid cid w = WS.assertMatch_ timeout w $ \notif -> do
+        ntfTransient notif @?= False
+        let e = List1.head (WS.unpackPayload notif)
+        e^.eventType @?= ConvDelete
+        e^.eventTeam @?= tid
+        e^.eventData @?= Just (EdConvDelete cid)
+-}
+
 wsAssertMessage :: MonadIO m => WS.WebSocket -> ConvId -> UserId -> ClientId -> ClientId -> Text -> m ()
 wsAssertMessage ws conv fromu fromc to txt = void $ liftIO $
     WS.assertMatch (5 # Second) ws $ \n -> do
@@ -1036,6 +1161,17 @@ svcAssertMemberLeave buf usr gone cnv = liftIO $ do
             assertEqual "event data" (Just (EdMembers msg)) (evtData e)
         _ -> assertFailure "Event timeout (TestBotMessage: member-leave)"
 
+svcAssertConvDelete :: MonadIO m => Chan TestBotEvent -> UserId -> ConvId -> m ()
+svcAssertConvDelete buf usr cnv = liftIO $ do
+    evt <- timeout (5 # Second) $ readChan buf
+    case evt of
+        Just (TestBotMessage e) -> do
+            assertEqual "event type" ConvDelete (evtType e)
+            assertEqual "conv" cnv (evtConv e)
+            assertEqual "user" usr (evtFrom e)
+            assertEqual "event data" Nothing (evtData e)
+        _ -> assertFailure "Event timeout (TestBotMessage: conv-delete)"
+
 svcAssertBotCreated :: MonadIO m => Chan TestBotEvent -> BotId -> ConvId -> m TestBot
 svcAssertBotCreated buf bid cid = liftIO $ do
     evt <- timeout (5 # Second) $ readChan buf
@@ -1058,6 +1194,20 @@ svcAssertMessage buf from msg cnv = liftIO $ do
             assertEqual "user" from (evtFrom e)
             assertEqual "event data" (Just (EdOtrMessage msg)) (evtData e)
         _ -> assertFailure "Event timeout (TestBotMessage: otr-message-add)"
+
+svcAssertEventuallyConvDelete :: MonadIO m => Chan TestBotEvent -> UserId -> ConvId -> m ()
+svcAssertEventuallyConvDelete buf usr cnv = liftIO $ do
+    evt <- timeout (5 # Second) $ readChan buf
+    case evt of
+        Just (TestBotMessage e) | evtType e == ConvDelete -> do
+            assertEqual "event type" ConvDelete (evtType e)
+            assertEqual "conv" cnv (evtConv e)
+            assertEqual "user" usr (evtFrom e)
+            assertEqual "event data" Nothing (evtData e)
+        -- We ignore every other message type
+        Just (TestBotMessage _) ->
+            svcAssertEventuallyConvDelete buf usr cnv
+        _ -> assertFailure "Event timeout (TestBotMessage: conv-delete)"
 
 unpackEvents :: Notification -> List1 Event
 unpackEvents = WS.unpackPayload
