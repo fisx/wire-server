@@ -136,4 +136,3 @@ nonTeamMembers cm tm = filter (not . flip isTeamMember tm . memId) cm
 membersToRecipients :: Maybe UserId -> [TeamMember] -> [Recipient]
 membersToRecipients Nothing  = map (userRecipient . view userId)
 membersToRecipients (Just u) = map userRecipient . filter (/= u) . map (view userId)
---(bots, users) <- botsAndUsers <$> Data.members (c^.conversationId)

@@ -66,7 +66,6 @@ import qualified Data.Text.Encoding                as Text
 import qualified Data.UUID                         as UUID
 import qualified Data.ZAuth.Token                  as ZAuth
 import qualified Galley.Types.Teams                as Team
---import qualified Galley.Types.Teams.Intra          as Team
 import qualified Network.Wai.Handler.Warp          as Warp
 import qualified Network.Wai.Handler.WarpTLS       as Warp
 import qualified Network.Wai.Handler.Warp.Internal as Warp
@@ -624,7 +623,10 @@ testDeleteTeamBotTeam config crt db brig galley cannon =
     forM_ [uid1, uid2] $ \uid ->
         retryWhileN 10 (/= Intra.Deleted) (getStatus brig uid)
 
-    -- TODO: Still does not work
+    -- NOTE: Due to the async nature of a team deletion, some
+    -- events may or may not be sent (for instance, team members)
+    -- leaving a conversation. Thus, we check _only_ for the relevant
+    -- ones for the bot, which are the ConvDelete event
     svcAssertEventuallyConvDelete buf uid1 cid
 
     -- Check that the conversation no longer exists
@@ -1118,14 +1120,6 @@ wsAssertTeamConvDelete ws tid conv = void $ liftIO $
         e^.(Team.eventType) @?= Team.ConvDelete
         e^.(Team.eventTeam) @?= tid
         e^.(Team.eventData) @?= Just (Team.EdConvDelete conv)
-
-{-    checkTeamConvDeleteEvent tid cid w = WS.assertMatch_ timeout w $ \notif -> do
-        ntfTransient notif @?= False
-        let e = List1.head (WS.unpackPayload notif)
-        e^.eventType @?= ConvDelete
-        e^.eventTeam @?= tid
-        e^.eventData @?= Just (EdConvDelete cid)
--}
 
 wsAssertMessage :: MonadIO m => WS.WebSocket -> ConvId -> UserId -> ClientId -> ClientId -> Text -> m ()
 wsAssertMessage ws conv fromu fromc to txt = void $ liftIO $

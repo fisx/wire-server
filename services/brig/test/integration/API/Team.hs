@@ -2,7 +2,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TupleSections     #-}
 
-module API.Team where
+module API.Team (tests) where
 
 import API.Search.Util
 import API.Team.Util

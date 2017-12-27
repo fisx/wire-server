@@ -44,12 +44,13 @@ import Data.List1 (list1)
 import Data.List (partition)
 import Data.Maybe (catMaybes, isJust)
 import Data.Range
-import Data.Time.Clock (getCurrentTime)
+import Data.Time.Clock (getCurrentTime, UTCTime (..))
 import Data.Traversable (mapM)
 import Data.Set (fromList, toList)
 import Galley.App
 import Galley.API.Error
 import Galley.API.Util
+import Galley.Data.Services (BotMember)
 import Galley.Intra.Push
 import Galley.Intra.User
 import Galley.Options
@@ -176,25 +177,28 @@ uncheckedDeleteTeam :: UserId -> Maybe ConnId -> TeamId -> Galley ()
 uncheckedDeleteTeam zusr zcon tid = do
     team <- Data.team tid
     when (isJust team) $ do
-        membs  <- Data.teamMembers tid
-        now    <- liftIO getCurrentTime
-        convs  <- filter (not . view managedConversation) <$> Data.teamConversations tid
-        events <- foldrM (pushEvents now membs) [] convs
+        membs    <- Data.teamMembers tid
+        now      <- liftIO getCurrentTime
+        convs    <- filter (not . view managedConversation) <$> Data.teamConversations tid
+        (ue, be) <- foldrM (pushEvents now membs) ([],[]) convs
         let e = newEvent TeamDelete tid now
         let r = list1 (userRecipient zusr) (membersToRecipients (Just zusr) membs)
-        pushSome ((newPush1 zusr (TeamEvent e) r & pushConn .~ zcon) : events)
-        -- TODO: Events for bots?
+        pushSome ((newPush1 zusr (TeamEvent e) r & pushConn .~ zcon) : ue)
+        void . fork $ void $ External.deliver be
         when ((view teamBinding . tdTeam <$> team) == Just Binding) $ do
             mapM_ (deleteUser . view userId) membs
             Journal.teamDelete tid
         Data.deleteTeam tid
   where
-    pushEvents now membs c pp = do
-        (_bots, users) <- botsAndUsers <$> Data.members (c^.conversationId)
+    pushEvents :: UTCTime -> [TeamMember] -> TeamConversation -> ([Push],[(BotMember, Conv.Event)]) -> Galley ([Push],[(BotMember, Conv.Event)])
+    pushEvents now membs c (pp, ee) = do
+        (bots, users) <- botsAndUsers <$> Data.members (c^.conversationId)
         let mm = nonTeamMembers users membs
         let e = Conv.Event Conv.ConvDelete (c^.conversationId) zusr now Nothing
         let p = newPush zusr (ConvEvent e) (map recipient mm)
-        pure (maybe pp (\x -> (x & pushConn .~ zcon) : pp) p)
+        let ee' = bots `zip` repeat e
+        let pp' = maybe pp (\x -> (x & pushConn .~ zcon) : pp) p
+        pure (pp', ee' ++ ee)
 
 getTeamMembers :: UserId ::: TeamId ::: JSON -> Galley Response
 getTeamMembers (zusr::: tid ::: _) = do
