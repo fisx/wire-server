@@ -11,9 +11,12 @@
 module Main where
 
 import Imports
+import Control.Lens ((^.))
+import Spar.Run (mkApp)
 import System.Environment (withArgs)
 import Test.Hspec
 import Util
+import Web.Scim.Test.Acceptance (microsoftAzure)
 
 import qualified Test.LoggingSpec
 import qualified Test.MetricsSpec
@@ -29,7 +32,9 @@ main :: IO ()
 main = do
   (wireArgs, hspecArgs) <- partitionArgs <$> getArgs
   env <- withArgs wireArgs mkEnvFromOptions
-  withArgs hspecArgs . hspec . beforeAll (pure env) . afterAll destroyEnv $ mkspec
+  withArgs hspecArgs . hspec $ do
+    beforeAll (pure env) . afterAll destroyEnv $ mkspec
+    mkspec' env
 
 partitionArgs :: [String] -> ([String], [String])
 partitionArgs = go [] []
@@ -49,3 +54,8 @@ mkspec = do
     describe "Spar.Intra.Brig" Test.Spar.Intra.BrigSpec.spec
     describe "Spar.Scim.Auth" Test.Spar.Scim.AuthSpec.spec
     describe "Spar.Scim.User" Test.Spar.Scim.UserSpec.spec
+
+mkspec' :: TestEnv -> Spec
+mkspec' env = do
+    describe "hscim acceptance tests" $
+      microsoftAzure $ fst <$> mkApp (env ^. teOpts)
